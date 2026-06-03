@@ -1037,9 +1037,69 @@ body {
       <div class="faction-badge wu">吳</div>
     </div>
     <div>
-      <button class="btn-primary" onclick="showScreen('setup')">게임 시작</button>
+      <button class="btn-primary" onclick="showScreen('setup')">오프라인 대전 (한 기기)</button>
+      <button class="btn-primary" onclick="openOnlineLobby()">🌐 온라인 대전</button>
       <button class="btn-secondary" onclick="showScreen('rules')">규칙 보기</button>
     </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════ ONLINE LOBBY ══════════════════════════════ -->
+<div id="screen-lobby" class="screen">
+  <div class="title-content" style="max-width:520px;margin:0 auto;padding-top:40px;">
+    <div class="title-main" style="font-size:38px;">🌐 온라인 대전</div>
+    <div id="lobby-status" class="net-status"></div>
+
+    <div id="lobby-home">
+      <button class="btn-primary" style="width:100%;margin:10px 0;" onclick="netQuickMatch()">⚡ 빠른 매칭 (랜덤 상대)</button>
+      <button class="btn-primary" style="width:100%;margin:10px 0;" onclick="netCreateRoom()">🚪 방 만들기 (코드 공유)</button>
+      <div style="display:flex;gap:8px;margin:10px 0;">
+        <input id="lobby-code-input" class="net-input" maxlength="6" placeholder="방 코드 입력" style="flex:1;text-transform:uppercase;">
+        <button class="btn-primary" style="white-space:nowrap;" onclick="netJoinRoom()">참가</button>
+      </div>
+    </div>
+
+    <div id="lobby-waiting" style="display:none;">
+      <div class="net-status">방 코드: <span id="lobby-room-code" class="room-code">------</span></div>
+      <div style="opacity:.8;margin:10px 0;font-size:14px;">친구에게 이 코드를 알려주세요. 상대가 들어오면 자동으로 시작됩니다.</div>
+      <div class="net-spinner">상대를 기다리는 중...</div>
+    </div>
+
+    <button class="btn-secondary" style="margin-top:24px;" onclick="netLeaveAll();showScreen('title')">← 타이틀로</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════════ ONLINE SETUP ══════════════════════════════ -->
+<div id="screen-online-setup" class="screen">
+  <div style="max-width:760px;margin:0 auto;padding:24px 16px 80px;">
+    <div class="title-main" style="font-size:30px;text-align:center;">⚔ 군대 편성</div>
+    <div id="onsetup-banner" class="net-status" style="text-align:center;"></div>
+
+    <div style="text-align:center;margin:14px 0;">
+      <div style="font-size:13px;opacity:.8;margin-bottom:6px;">세력 선택</div>
+      <div id="onsetup-factions" style="display:flex;gap:8px;justify-content:center;"></div>
+      <div id="onsetup-faction-warn" style="color:var(--wu-color);font-size:12px;margin-top:6px;min-height:16px;"></div>
+    </div>
+
+    <div id="onsetup-wintarget" style="text-align:center;margin:14px 0;display:none;">
+      <div style="font-size:13px;opacity:.8;margin-bottom:6px;">승리 조건 (방장만 설정)</div>
+      <div style="display:flex;gap:8px;justify-content:center;">
+        <button class="win-btn active" onclick="onsetupWin(2,this)">2명 탈출</button>
+        <button class="win-btn" onclick="onsetupWin(4,this)">4명 탈출</button>
+        <button class="win-btn" onclick="onsetupWin(8,this)">8명 탈출</button>
+      </div>
+    </div>
+
+    <div style="text-align:center;font-size:13px;opacity:.85;margin:10px 0;">
+      장수 선택: <span id="onsetup-count">0</span> / 8
+    </div>
+    <div id="onsetup-generals" class="general-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(78px,1fr));gap:8px;"></div>
+
+    <div style="display:flex;gap:10px;justify-content:center;margin-top:20px;">
+      <button class="btn-secondary" onclick="netLeaveAll();showScreen('title')">나가기</button>
+      <button class="btn-primary" id="onsetup-ready-btn" onclick="netToggleReady()">준비 완료</button>
+    </div>
+    <div id="onsetup-readystate" class="net-status" style="text-align:center;margin-top:12px;"></div>
   </div>
 </div>
 
@@ -2992,6 +3052,422 @@ function showScreen(id) {
 // INIT
 // ════════════════════════════════════════════════════════════════
 showScreen('title');
+</script>
+<!-- ════════ ONLINE MULTIPLAYER MODULE ════════ -->
+<script>
+/* ════════════════════════════════════════════════════════════════
+   삼국열전기 大戰 — 온라인 대전 모듈 (Firebase Realtime Database)
+   · 기존 오프라인(패스앤플레이) 로직은 그대로 두고 그 위에 얹는 레이어.
+   · 게임 상태 G 전체를 직렬화해 방에 쓰고, 양 클라이언트가 구독해 재현.
+   · 턴 단위 동기화(비동기 "순서 기다림" 모드).
+   ════════════════════════════════════════════════════════════════ */
+(function () {
+  // ⬇⬇⬇ ★ 사용자가 반드시 본인 Firebase 프로젝트 정보로 바꿔야 하는 부분 ★ ⬇⬇⬇
+  const FIREBASE_CONFIG = {
+    apiKey: "AIzaSyDoQzja9iH27Fha3jVv-rRUCm0B1Yj1wIo",
+    authDomain: "sanguorezhanji.firebaseapp.com",
+    databaseURL: "https://sanguorezhanji-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "sanguorezhanji",
+    storageBucket: "sanguorezhanji.firebasestorage.app",
+    messagingSenderId: "619926038295",
+    appId: "1:619926038295:web:456f511c52b6f6cca0f952",
+    measurementId: "G-86GCB09ENL"
+  };
+  // ⬆⬆⬆ ★ 여기까지 (자세한 방법은 함께 드린 설명서 참고) ★ ⬆⬆⬆
+
+  const SDK_APP = "https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js";
+  const SDK_DB  = "https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js";
+
+  const NET = {
+    active: false, db: null,
+    code: null, myIdx: null, roomRef: null,
+    myFaction: 'shu', myDeck: [], winTarget: 2, iAmReady: false,
+    lastSeq: -1, started: false, waitingRegistered: false,
+    clientId: Math.random().toString(36).slice(2, 10)
+  };
+  window.NET = NET;
+
+  // 원본 함수 보관 (나중에 래핑)
+  const _endTurn      = window.endTurn;
+  const _onCellClick  = window.onCellClick;
+  const _triggerWin   = window.triggerWin;
+  const _showScreen   = window.showScreen;
+  const _actionSummon = window.actionSummon;
+  const _actionExp    = window.actionExp;
+  const _actionArrow  = window.actionArrow;
+  const _rollDice     = window.rollDice;
+
+  function configMissing() {
+    return !FIREBASE_CONFIG.databaseURL ||
+           FIREBASE_CONFIG.databaseURL.indexOf("YOUR_PROJECT") >= 0;
+  }
+
+  /* ── 스타일 / 오버레이 주입 ── */
+  const style = document.createElement('style');
+  style.textContent = `
+    .net-status{font-size:14px;color:var(--text-dim);margin:10px 0;line-height:1.5;}
+    .net-input{background:#1a140c;border:1px solid var(--border-gold);color:var(--text-light);
+      padding:10px 12px;border-radius:6px;font-size:16px;font-family:inherit;}
+    .room-code{font-family:'Cinzel',serif;font-size:30px;letter-spacing:6px;color:var(--gold);font-weight:900;}
+    .net-spinner{margin-top:16px;color:var(--gold);animation:netpulse 1.2s ease-in-out infinite;}
+    @keyframes netpulse{0%,100%{opacity:.4}50%{opacity:1}}
+    #net-lock{position:fixed;inset:0;z-index:900;display:none;align-items:center;justify-content:center;
+      background:rgba(5,4,2,.45);}
+    #net-lock.show{display:flex;}
+    #net-lock .box{background:var(--panel-bg);border:1px solid var(--border-gold);border-radius:10px;
+      padding:22px 30px;text-align:center;color:var(--text-light);font-size:16px;}
+    #net-lock .box .sub{font-size:13px;color:var(--text-dim);margin-top:8px;}
+    #net-banner{position:fixed;top:0;left:0;right:0;z-index:1200;background:var(--wu-color);
+      color:#fff;text-align:center;padding:8px;font-size:14px;display:none;}
+  `;
+  document.head.appendChild(style);
+
+  const lock = document.createElement('div');
+  lock.id = 'net-lock';
+  lock.innerHTML = '<div class="box"><div id="net-lock-msg">상대의 차례를 기다리는 중...</div>' +
+                   '<div class="sub">상대가 행동을 마치면 자동으로 진행됩니다.</div></div>';
+  document.body.appendChild(lock);
+
+  const banner = document.createElement('div');
+  banner.id = 'net-banner';
+  document.body.appendChild(banner);
+  function showBanner(t) { banner.textContent = t; banner.style.display = 'block'; }
+  function hideBanner() { banner.style.display = 'none'; }
+
+  /* ── Firebase SDK 지연 로딩 ── */
+  function loadScript(src) {
+    return new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = res; s.onerror = () => rej(new Error('SDK 로드 실패'));
+      document.head.appendChild(s);
+    });
+  }
+  let sdkReady = null;
+  async function ensureFirebase() {
+    if (NET.db) return NET.db;
+    if (configMissing()) throw new Error('CONFIG_MISSING');
+    if (!sdkReady) {
+      sdkReady = (async () => {
+        await loadScript(SDK_APP);
+        await loadScript(SDK_DB);
+        firebase.initializeApp(FIREBASE_CONFIG);
+      })();
+    }
+    await sdkReady;
+    NET.db = firebase.database();
+    return NET.db;
+  }
+
+  function setLobbyStatus(t) { const e = document.getElementById('lobby-status'); if (e) e.textContent = t; }
+  function genCode() {
+    const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let s = ''; for (let i = 0; i < 4; i++) s += c[Math.floor(Math.random() * c.length)];
+    return s;
+  }
+
+  /* ════════════ 로비 진입 ════════════ */
+  window.openOnlineLobby = async function () {
+    _showScreen('lobby');
+    document.getElementById('lobby-home').style.display = 'block';
+    document.getElementById('lobby-waiting').style.display = 'none';
+    setLobbyStatus('');
+    if (configMissing()) {
+      document.getElementById('lobby-home').style.display = 'none';
+      setLobbyStatus('⚠ 온라인 기능을 사용하려면 먼저 HTML 코드 안 FIREBASE_CONFIG에 ' +
+                     '본인 Firebase 프로젝트 정보를 입력해야 합니다. (함께 드린 설명서 참고)');
+      return;
+    }
+    try { setLobbyStatus('서버에 연결 중...'); await ensureFirebase(); setLobbyStatus(''); }
+    catch (e) { setLobbyStatus('서버 연결 실패: ' + e.message); }
+  };
+
+  function attachRoom(code, myIdx) {
+    NET.code = code; NET.myIdx = myIdx; NET.active = true; NET.lastSeq = -1;
+    NET.roomRef = NET.db.ref('rooms/' + code);
+    const meRef = NET.roomRef.child('players/' + myIdx);
+    meRef.child('connected').set(true);
+    meRef.child('connected').onDisconnect().set(false);
+    NET.roomRef.on('value', snap => onRoomUpdate(snap.val()));
+  }
+
+  /* ════════════ 방 만들기 / 참가 / 빠른 매칭 ════════════ */
+  window.netCreateRoom = async function () {
+    try { await ensureFirebase(); } catch (e) { setLobbyStatus('연결 실패: ' + e.message); return; }
+    const code = genCode();
+    await NET.db.ref('rooms/' + code).set({
+      host: NET.clientId, status: 'setup', createdAt: Date.now(),
+      winTarget: 2,
+      players: { 0: { connected: true, ready: false, faction: 'shu', deck: [] } }
+    });
+    document.getElementById('lobby-home').style.display = 'none';
+    document.getElementById('lobby-waiting').style.display = 'block';
+    document.getElementById('lobby-room-code').textContent = code;
+    attachRoom(code, 0);
+  };
+
+  window.netJoinRoom = async function (codeArg) {
+    let code = (typeof codeArg === 'string' ? codeArg
+                : document.getElementById('lobby-code-input').value).trim().toUpperCase();
+    if (!code) { setLobbyStatus('방 코드를 입력하세요.'); return; }
+    try { await ensureFirebase(); } catch (e) { setLobbyStatus('연결 실패: ' + e.message); return; }
+    const ref = NET.db.ref('rooms/' + code);
+    const snap = await ref.get();
+    if (!snap.exists()) { setLobbyStatus('존재하지 않는 방입니다: ' + code); return; }
+    const room = snap.val();
+    if (room.players && room.players[1] && room.players[1].connected) {
+      setLobbyStatus('이미 가득 찬 방입니다.'); return;
+    }
+    await ref.child('players/1').set({ connected: true, ready: false, faction: 'wei', deck: [] });
+    attachRoom(code, 1);
+  };
+
+  window.netQuickMatch = async function () {
+    try { await ensureFirebase(); } catch (e) { setLobbyStatus('연결 실패: ' + e.message); return; }
+    setLobbyStatus('상대를 찾는 중...');
+    const waitRef = NET.db.ref('lobby/waiting');
+    let joinCode = null;
+    await waitRef.transaction(cur => {
+      if (cur && cur.code) { joinCode = cur.code; return null; } // 대기방 차지
+      return cur;
+    });
+    if (joinCode) {
+      const ref = NET.db.ref('rooms/' + joinCode);
+      const s = await ref.get();
+      if (s.exists() && !(s.val().players && s.val().players[1] && s.val().players[1].connected)) {
+        await ref.child('players/1').set({ connected: true, ready: false, faction: 'wei', deck: [] });
+        setLobbyStatus('');
+        attachRoom(joinCode, 1);
+        return;
+      }
+    }
+    // 대기방이 없으면 내가 방을 만들고 대기 등록
+    const code = genCode();
+    await NET.db.ref('rooms/' + code).set({
+      host: NET.clientId, status: 'setup', createdAt: Date.now(), winTarget: 2,
+      players: { 0: { connected: true, ready: false, faction: 'shu', deck: [] } }
+    });
+    await waitRef.set({ code: code, ts: Date.now() });
+    waitRef.onDisconnect().remove();
+    NET.waitingRegistered = true;
+    document.getElementById('lobby-home').style.display = 'none';
+    document.getElementById('lobby-waiting').style.display = 'block';
+    document.getElementById('lobby-room-code').textContent = code;
+    setLobbyStatus('');
+    attachRoom(code, 0);
+  };
+
+  /* ════════════ 방 상태 변화 처리 ════════════ */
+  function bothPresent(room) {
+    return room && room.players && room.players[0] && room.players[1] &&
+           room.players[0].connected && room.players[1].connected;
+  }
+
+  function onRoomUpdate(room) {
+    if (!room) { if (!NET.started) setLobbyStatus('방이 사라졌습니다.'); return; }
+
+    // 게임 중 상대 접속 종료 감지
+    if (NET.started) {
+      const opp = room.players && room.players[1 - NET.myIdx];
+      if (opp && opp.connected === false) showBanner('⚠ 상대가 연결을 종료했습니다.');
+      else hideBanner();
+    }
+
+    // 둘 다 입장 → 온라인 셋업으로
+    if (room.status !== 'playing' && bothPresent(room)) {
+      if (NET.waitingRegistered) { NET.db.ref('lobby/waiting').remove(); NET.waitingRegistered = false; }
+      enterOnlineSetup(room);
+    }
+
+    // 게임 상태 브로드캐스트 수신
+    if (room.status === 'playing' && room.state && room.state.gameJson) {
+      const seq = room.state.seq || 0;
+      if (seq > NET.lastSeq) { NET.lastSeq = seq; netApply(JSON.parse(room.state.gameJson)); }
+    }
+
+    // 셋업 화면일 때 준비 상태 UI 갱신 + 방장 시작 판정
+    if (document.getElementById('screen-online-setup').classList.contains('active')) {
+      updateReadyUI(room);
+      if (NET.myIdx === 0 && !NET.started && room.status !== 'playing' &&
+          room.players[0] && room.players[1] &&
+          room.players[0].ready && room.players[1].ready) {
+        hostStartGame(room);
+      }
+    }
+  }
+
+  /* ════════════ 온라인 셋업 ════════════ */
+  function enterOnlineSetup(room) {
+    if (document.getElementById('screen-online-setup').classList.contains('active')) {
+      updateReadyUI(room); return;
+    }
+    _showScreen('online-setup');
+    NET.iAmReady = false;
+    NET.myFaction = NET.myIdx === 0 ? 'shu' : 'wei';
+    NET.myDeck = [];
+    document.getElementById('onsetup-wintarget').style.display = NET.myIdx === 0 ? 'block' : 'none';
+    document.getElementById('onsetup-banner').textContent =
+      `당신은 플레이어 ${NET.myIdx + 1}${NET.myIdx === 0 ? ' (방장)' : ''}`;
+    document.getElementById('onsetup-ready-btn').textContent = '준비 완료';
+    renderFactionBtns();
+    renderPicker();
+    pushMyChoice();
+    updateReadyUI(room);
+  }
+
+  function renderFactionBtns() {
+    const el = document.getElementById('onsetup-factions'); el.innerHTML = '';
+    ['wei', 'shu', 'wu'].forEach(f => {
+      const b = document.createElement('button');
+      b.className = 'faction-btn ' + f + (NET.myFaction === f ? ' active' : '');
+      b.textContent = FACTIONS[f].short;
+      b.onclick = () => {
+        if (NET.iAmReady) return;
+        NET.myFaction = f; NET.myDeck = [];
+        renderFactionBtns(); renderPicker(); pushMyChoice();
+      };
+      el.appendChild(b);
+    });
+  }
+
+  function renderPicker() {
+    const grid = document.getElementById('onsetup-generals'); grid.innerHTML = '';
+    ALL_GENERALS.filter(g => g.faction === NET.myFaction).forEach(g => {
+      const card = document.createElement('div');
+      card.className = 'general-card-small' + (g.isLord ? ' lord' : '') +
+                       (NET.myDeck.includes(g.id) ? ' selected' : '');
+      const thumb = g.img ? `<div class="gcs-thumb" style="background-image:url(${g.img})"></div>` : '';
+      card.innerHTML = `${thumb}<div class="g-name">${g.name}</div><button class="gcs-info" title="화살표 보기">ⓘ</button>`;
+      card.onclick = (e) => {
+        if (e.target.classList.contains('gcs-info')) { e.stopPropagation(); openGeneralPreview(g.id); return; }
+        if (NET.iAmReady) return;
+        const i = NET.myDeck.indexOf(g.id);
+        if (i >= 0) NET.myDeck.splice(i, 1);
+        else { if (NET.myDeck.length >= 8) { alert('8명까지만 선택할 수 있습니다.'); return; } NET.myDeck.push(g.id); }
+        renderPicker(); pushMyChoice();
+      };
+      grid.appendChild(card);
+    });
+    document.getElementById('onsetup-count').textContent = NET.myDeck.length;
+  }
+
+  function pushMyChoice() {
+    if (!NET.roomRef) return;
+    NET.roomRef.child('players/' + NET.myIdx).update({ faction: NET.myFaction, deck: NET.myDeck });
+    if (NET.myIdx === 0) NET.roomRef.child('winTarget').set(NET.winTarget);
+  }
+
+  window.onsetupWin = function (n, btn) {
+    NET.winTarget = n;
+    btn.parentElement.querySelectorAll('.win-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    if (NET.roomRef) NET.roomRef.child('winTarget').set(n);
+  };
+
+  window.netToggleReady = function () {
+    if (NET.myDeck.length < 1) { alert('최소 1명의 장수를 선택하세요.'); return; }
+    NET.iAmReady = !NET.iAmReady;
+    NET.roomRef.child('players/' + NET.myIdx)
+      .update({ faction: NET.myFaction, deck: NET.myDeck, ready: NET.iAmReady });
+    if (NET.myIdx === 0) NET.roomRef.child('winTarget').set(NET.winTarget);
+    document.getElementById('onsetup-ready-btn').textContent = NET.iAmReady ? '준비 취소' : '준비 완료';
+  };
+
+  function updateReadyUI(room) {
+    const opp = (room.players && room.players[1 - NET.myIdx]) || {};
+    const sameFaction = opp.faction && opp.faction === NET.myFaction;
+    document.getElementById('onsetup-faction-warn').textContent =
+      sameFaction ? '⚠ 상대와 같은 세력입니다. 다른 세력을 선택하세요.' : '';
+    const oppName = `플레이어 ${(1 - NET.myIdx) + 1}`;
+    let s;
+    if (!opp.connected) s = '상대를 기다리는 중...';
+    else s = `${oppName}: ${opp.faction ? FACTIONS[opp.faction].name : '세력 선택 중'} · ` +
+             `장수 ${(opp.deck || []).length}/8 · ${opp.ready ? '✅ 준비완료' : '⏳ 준비중'}`;
+    document.getElementById('onsetup-readystate').textContent = s;
+    document.getElementById('onsetup-ready-btn').disabled = !!sameFaction;
+  }
+
+  function hostStartGame(room) {
+    if (NET.started) return;
+    const p0 = room.players[0], p1 = room.players[1];
+    if (!p0.deck || !p1.deck || p0.faction === p1.faction) return;
+    NET.started = true;
+    initGameState(p0.deck, p1.deck, p0.faction, p1.faction, room.winTarget || 2, false);
+    NET.roomRef.child('status').set('playing');
+    broadcast();
+  }
+
+  /* ════════════ 게임 상태 동기화 ════════════ */
+  function broadcast() {
+    if (!NET.active || !NET.roomRef) return;
+    NET.roomRef.child('state').set({ seq: Date.now(), gameJson: JSON.stringify(G) });
+  }
+  window.netBroadcast = broadcast;
+
+  function netApply(g) {
+    NET.started = true;
+    G = g;
+    if (!document.getElementById('screen-game').classList.contains('active')) _showScreen('game');
+    renderGame();
+    updateLock();
+    if (G.winner !== undefined && G.winner !== null) {
+      setTimeout(() => _triggerWin(G.winner), 300);
+    }
+  }
+
+  function myTurn() { return !NET.active || G.turn === NET.myIdx; }
+
+  function updateLock() {
+    if (!NET.active || (G && G.winner !== undefined && G.winner !== null) || myTurn()) {
+      lock.classList.remove('show'); return;
+    }
+    document.getElementById('net-lock-msg').textContent =
+      `플레이어 ${G.turn + 1}의 차례입니다 — 기다리는 중...`;
+    lock.classList.add('show');
+  }
+  window.netUpdateLock = updateLock;
+
+  window.netLeaveAll = function () {
+    try {
+      if (NET.waitingRegistered && NET.db) { NET.db.ref('lobby/waiting').remove(); NET.waitingRegistered = false; }
+      if (NET.roomRef) {
+        NET.roomRef.off();
+        NET.roomRef.child('players/' + NET.myIdx + '/connected').set(false);
+      }
+    } catch (e) {}
+    NET.active = false; NET.started = false; NET.roomRef = null;
+    NET.code = null; NET.myIdx = null; NET.lastSeq = -1; NET.iAmReady = false;
+    lock.classList.remove('show'); hideBanner();
+  };
+
+  /* ════════════ 기존 함수 래핑 ════════════ */
+  window.endTurn = function () {
+    if (NET.active && !myTurn()) return;
+    _endTurn();
+    if (NET.active) { broadcast(); updateLock(); }
+  };
+
+  window.triggerWin = function (pi) {
+    if (NET.active) { G.winner = pi; broadcast(); }
+    _triggerWin(pi);
+  };
+
+  window.onCellClick = function (r, c) {
+    if (NET.active && !myTurn()) return;
+    _onCellClick(r, c);
+  };
+
+  window.actionSummon = function () { if (NET.active && !myTurn()) return; return _actionSummon.apply(this, arguments); };
+  window.actionExp    = function () { if (NET.active && !myTurn()) return; return _actionExp.apply(this, arguments); };
+  window.actionArrow  = function () { if (NET.active && !myTurn()) return; return _actionArrow.apply(this, arguments); };
+  window.rollDice     = function () { if (NET.active && !myTurn()) return; return _rollDice.apply(this, arguments); };
+
+  // 타이틀/오프라인 셋업으로 나가면 온라인 세션 정리
+  window.showScreen = function (id) {
+    if ((id === 'title' || id === 'setup') && NET.active) window.netLeaveAll();
+    _showScreen(id);
+  };
+})();
+
 </script>
 </body>
 </html>
