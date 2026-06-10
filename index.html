@@ -819,6 +819,19 @@ body {
 
 .arrow-cell.locked        { opacity: 0.25; }
 
+/* 보드 위 이동 방향 화살표 (장수 클릭 시) */
+.move-arrow {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 26px; font-weight: 900; line-height: 1;
+  pointer-events: none; z-index: 0;
+}
+.move-arrow.aa-green { color: #5cd884; text-shadow: 0 0 5px rgba(46,204,113,0.7); }
+.move-arrow.aa-blue  { color: #5ab4ff; text-shadow: 0 0 5px rgba(52,152,219,0.7); }
+.move-arrow.aa-red   { color: #ff7a68; text-shadow: 0 0 5px rgba(231,76,60,0.7); }
+.move-arrow.aa-gold  { color: #ffe44a; text-shadow: 0 0 5px rgba(241,196,15,0.7); }
+.move-arrow.inactive { opacity: 0.30; text-shadow: none; }
+
 /* DICE MODAL */
 .modal-overlay {
   position: fixed; inset: 0;
@@ -2180,12 +2193,59 @@ function cellTypeClass(row, col) {
 
 const CELL_ICONS = { S1:'S', S2:'S', R1:'R', R2:'R', RM:'RM', E:'E', A:'A', W:'W', X:'', N:'' };
 
+// 클릭한 장수의 이동 방향 화살표를 칸별로 계산 ('r,c' → {glyph,colorClass,active})
+function findGeneralByFocus(f) {
+  if (!f || !G.players || !G.players[f.pi]) return null;
+  return G.players[f.pi].hand.find(x => x.id === f.id) || null;
+}
+function computeArrowCells() {
+  if (!arrowFocus) return null;
+  const g = findGeneralByFocus(arrowFocus);
+  if (!g || !g.onField || !g.pos) return null;
+  const pi = g.playerIdx;
+  const flip = { 0:7, 1:6, 2:5, 3:4, 4:3, 5:2, 6:1, 7:0 };
+  const moveTargets = getMoveTargets(g);
+  const map = {};
+  // 기본 8방향 (G/B/R). 이동 가능 칸이면 active(선명), 아니면 inactive(흐림).
+  for (let raw = 0; raw < 8; raw++) {
+    const color = g.arrows[raw];
+    if (color === 'X') continue;
+    const bi = (pi === 0) ? raw : flip[raw];
+    const [dr, dc] = DIR_DELTA[bi];
+    const nr = g.pos.row + dr, nc = g.pos.col + dc;
+    if (nr < 0 || nr >= 8 || nc < 0 || nc >= 7) continue;
+    if (BOARD_LAYOUT[nr][nc] === 'X') continue;
+    const active = moveTargets.some(t => t.row === nr && t.col === nc);
+    const colorClass = color === 'G' ? 'aa-green' : color === 'B' ? 'aa-blue' : 'aa-red';
+    map[nr + ',' + nc] = { glyph: DIR_LABELS[bi], colorClass, active };
+  }
+  // 금색(군주 Lv7, 2칸): 금색 방향의 1·2칸 지점에 금색 화살표
+  if (g.isLord && g.goldDirs && g.goldDirs.length) {
+    g.goldDirs.forEach(raw => {
+      const bi = (pi === 0) ? raw : flip[raw];
+      const [dr, dc] = DIR_DELTA[bi];
+      [1, 2].forEach(step => {
+        const nr = g.pos.row + dr * step, nc = g.pos.col + dc * step;
+        if (nr < 0 || nr >= 8 || nc < 0 || nc >= 7) return;
+        if (BOARD_LAYOUT[nr][nc] === 'X') return;
+        const active = moveTargets.some(t => t.row === nr && t.col === nc && t.isGold);
+        const key = nr + ',' + nc;
+        const prevActive = map[key] && map[key].active;
+        map[key] = { glyph: DIR_LABELS[bi], colorClass: 'aa-gold', active: active || prevActive };
+      });
+    });
+  }
+  return map;
+}
+
 function renderBoard() {
   const board = document.getElementById('game-board');
-  // 회전 모드 + P2 차례면 보드 180도 회전
-  const shouldFlip = G.rotateBoard && G.turn === 1;
+  // 회전 모드 + P2 차례면 보드 180도 회전 / 온라인에서 내가 P2면 항상 내 시점으로 뒤집기
+  const onlineP2 = (typeof NET !== 'undefined' && NET && NET.active && NET.myIdx === 1);
+  const shouldFlip = (G.rotateBoard && G.turn === 1) || onlineP2;
   board.classList.toggle('flipped', shouldFlip);
   board.innerHTML = '';
+  const arrowMap = computeArrowCells();
 
   for (let r = 0; r < 8; r++) {
     for (let c = 0; c < 7; c++) {
@@ -2214,6 +2274,17 @@ function renderBoard() {
         lbl.className = 'cell-label';
         lbl.textContent = CELL_ICONS[type] || '';
         cell.appendChild(lbl);
+      }
+
+      // 이동 방향 화살표 (클릭한 장수 기준) — 토큰보다 아래에 깔린다
+      if (arrowMap) {
+        const a = arrowMap[r + ',' + c];
+        if (a) {
+          const ael = document.createElement('div');
+          ael.className = 'move-arrow ' + a.colorClass + (a.active ? '' : ' inactive');
+          ael.textContent = a.glyph;
+          cell.appendChild(ael);
+        }
       }
 
       // General tokens — 한 칸에 여러 장수가 있을 수 있다 (전투 중인 두 장수)
@@ -2528,6 +2599,7 @@ function onCellClick(row, col) {
     G.selectedCell = { row, col };
     G.highlights = null;
     G.detailFocus[pi] = myHere.id;
+    arrowFocus = { pi: myHere.playerIdx, id: myHere.id };
 
     if (!G.actionDone) {
       const targets = getMoveTargets(myHere);
@@ -2543,9 +2615,13 @@ function onCellClick(row, col) {
     return;
   }
 
-  // 3) 적 장수만 있는 칸 → 정보만 표시
+  // 3) 적 장수만 있는 칸 → 정보 + 이동 화살표만 표시 (초록 표시는 해제하여 아군과 차별화)
   if (enemyHere) {
+    G.selected = null;
+    G.selectedCell = null;
+    G.highlights = null;
     G.detailFocus[enemyHere.playerIdx] = enemyHere.id;
+    arrowFocus = { pi: enemyHere.playerIdx, id: enemyHere.id };
     renderGame();
     setFooterInfo(`${enemyHere.name} (상대 장수) - Lv.${enemyHere.level}, HP:${enemyHere.hp}/${enemyHere.maxHp}`);
     return;
@@ -2555,6 +2631,7 @@ function onCellClick(row, col) {
   G.selected = null;
   G.selectedCell = null;
   G.highlights = null;
+  arrowFocus = null;
   renderGame();
   setFooterInfo('장수를 선택하세요.');
   updateActionButtons();
@@ -2830,6 +2907,7 @@ function endTurn() {
 // COMBAT SYSTEM
 // ════════════════════════════════════════════════════════════════
 let combatCtx = null;
+let arrowFocus = null; // {pi, id} — 클릭한 필드 장수의 이동 화살표 표시 대상 (동기화 안 함, 로컬 UI)
 
 function startCombat(attacker, defender, targetRow, targetCol, fromRow, fromCol) {
   const cellType = BOARD_LAYOUT[targetRow][targetCol];
@@ -2884,16 +2962,20 @@ function rollDice() {
 
     const winner = roll1 > roll2 ? attacker : defender;
     const loser  = roll1 > roll2 ? defender : attacker;
-    const dmg = Math.abs(roll1 - roll2);
+    const rawDmg = Math.abs(roll1 - roll2);
+    // 군주는 전투에서 받는 피해를 1 차감 (공격력은 그대로, 최소 0)
+    const lordReduced = (loser.isLord && rawDmg > 0) ? 1 : 0;
+    const dmg = Math.max(0, rawDmg - lordReduced);
     loser.hp -= dmg;
 
+    const lordNote = lordReduced ? `<br><span style="color:var(--gold);font-size:12px">👑 군주 피해 감소 (${rawDmg} → ${dmg})</span>` : '';
     document.getElementById('dice-result').innerHTML =
       `<span class="winner">${winner.name} 승리!</span><br>` +
-      `<span class="damage">${loser.name} ${dmg} 피해 → HP ${loser.hp}/${loser.maxHp}</span>`;
+      `<span class="damage">${loser.name} ${dmg} 피해 → HP ${loser.hp}/${loser.maxHp}</span>` + lordNote;
     document.getElementById('dice-roll-btn').textContent = '확인';
     document.getElementById('dice-roll-btn').onclick = resolveCombat;
 
-    addLog(`⚔ ${attacker.name}(${roll1}) vs ${defender.name}(${roll2}): ${winner.name} 승! ${loser.name} -${dmg}HP`, 'battle');
+    addLog(`⚔ ${attacker.name}(${roll1}) vs ${defender.name}(${roll2}): ${winner.name} 승! ${loser.name} -${dmg}HP${lordReduced ? ' (군주 -1)' : ''}`, 'battle');
   }, 500);
 }
 
@@ -3078,6 +3160,7 @@ showScreen('title');
   const SDK_APP = "https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js";
   const SDK_DB  = "https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js";
 
+  const NET_VERSION = 'online-v6';
   const NET = {
     active: false, db: null,
     code: null, myIdx: null, roomRef: null,
@@ -3096,6 +3179,8 @@ showScreen('title');
   const _actionExp    = window.actionExp;
   const _actionArrow  = window.actionArrow;
   const _rollDice     = window.rollDice;
+  const _startCombat   = window.startCombat;
+  const _resolveCombat = window.resolveCombat;
 
   function configMissing() {
     return !FIREBASE_CONFIG.databaseURL ||
@@ -3188,6 +3273,7 @@ showScreen('title');
     meRef.child('connected').set(true);
     meRef.child('connected').onDisconnect().set(false);
     NET.roomRef.on('value', snap => onRoomUpdate(snap.val()));
+    NET.roomRef.child('combat').on('value', snap => onCombatUpdate(snap.val()));
   }
 
   /* ════════════ 방 만들기 / 참가 / 빠른 매칭 ════════════ */
@@ -3391,26 +3477,110 @@ showScreen('title');
     const p0 = room.players[0], p1 = room.players[1];
     if (!p0.deck || !p1.deck || p0.faction === p1.faction) return;
     NET.started = true;
+    NET.roomRef.child('combat').remove();
     initGameState(p0.deck, p1.deck, p0.faction, p1.faction, room.winTarget || 2, false);
     NET.roomRef.child('status').set('playing');
     broadcast();
   }
 
-  /* ════════════ 게임 상태 동기화 ════════════ */
+  /* ════════════ 게임 상태 동기화 ════════════
+     ⚠ 장수마다 base64 초상화(최대 수백 KB)가 들어 있어, G 전체를 그대로
+        전송하면 용량 초과로 전송이 실패한다(특정 장수에서 차례가 안 넘어가던 버그).
+        → 변하는 값만 보내고, 받는 쪽에서 createGeneral 로 고정 정보를 복원한다. */
+
+  // 장수 1명에서 "변하는 값"만 추출 (이미지/이름/세력/화살표 등 고정값 제외)
+  function slimGeneral(g) {
+    return {
+      id: g.id, playerIdx: g.playerIdx,
+      level: g.level, hp: g.hp, maxHp: g.maxHp,
+      expUsed: g.expUsed || [], arrowsLeft: g.arrowsLeft || 0,
+      onField: !!g.onField, pos: g.pos || null,
+      escaped: !!g.escaped, isDead: !!g.isDead, xpAccum: g.xpAccum || 0
+    };
+  }
+
+  function serializeG() {
+    return {
+      turn: G.turn, winTarget: G.winTarget, rotateBoard: !!G.rotateBoard,
+      escape: [G.escape[0] || 0, G.escape[1] || 0],
+      arrowShots: G.arrowShots || 0, lastAEntry: G.lastAEntry || null,
+      winner: (G.winner === undefined || G.winner === null) ? null : G.winner,
+      players: G.players.map(p => ({
+        faction: p.faction,
+        hand: p.hand.map(slimGeneral),
+        deadOrder: (p.deadOrder || []).slice()
+      }))
+    };
+  }
+
+  // 받은 slim 데이터로 완전한 G 복원 (dead[] 는 hand[] 와 동일 객체 참조 유지)
+  function deserializeG(o) {
+    const ng = {
+      turn: o.turn, winTarget: o.winTarget, rotateBoard: !!o.rotateBoard,
+      escape: o.escape || [0, 0],
+      selected: null, selectedCell: null, highlights: null,
+      phase: 'select', actionDone: false,
+      arrowShots: o.arrowShots || 0, lastAEntry: o.lastAEntry || null,
+      detailFocus: [null, null],
+      winner: (o.winner === undefined || o.winner === null) ? undefined : o.winner,
+      players: []
+    };
+    (o.players || []).forEach((p, pi) => {
+      const map = {};
+      const hand = (p.hand || []).map(s => {
+        const data = ALL_GENERALS.find(x => x.id === s.id);
+        if (!data) { console.warn('[NET] 알 수 없는 장수 id (버전 불일치 가능):', s.id); return null; }
+        const full = createGeneral(s.id, (s.playerIdx != null ? s.playerIdx : pi));
+        full.level = s.level; full.hp = s.hp; full.maxHp = s.maxHp;
+        full.expUsed = s.expUsed || []; full.arrowsLeft = s.arrowsLeft || 0;
+        full.onField = !!s.onField; full.pos = s.pos || null;
+        full.escaped = !!s.escaped; full.isDead = !!s.isDead; full.xpAccum = s.xpAccum || 0;
+        map[full.id] = full;
+        return full;
+      }).filter(Boolean);
+      const deadOrder = (p.deadOrder || []).slice();
+      const dead = deadOrder.map(id => map[id]).filter(Boolean);
+      ng.players.push({ faction: p.faction, hand: hand, dead: dead, deadOrder: deadOrder });
+    });
+    return ng;
+  }
+
   function broadcast() {
     if (!NET.active || !NET.roomRef) return;
-    NET.roomRef.child('state').set({ seq: Date.now(), gameJson: JSON.stringify(G) });
+    const gameJson = JSON.stringify(serializeG());
+    // ⚠ seq 를 각 클라이언트의 Date.now() 로 매기면 두 기기의 시계 차이 때문에
+    //    더 새로운 상태가 "오래된 것"으로 무시되어 양쪽이 교착될 수 있다.
+    //    → 서버에서 트랜잭션으로 seq 를 원자적으로 +1 해 순서를 한 줄로 정렬한다.
+    NET.roomRef.child('state').transaction(function (cur) {
+      const nextSeq = (cur && typeof cur.seq === 'number') ? cur.seq + 1 : 1;
+      return { seq: nextSeq, gameJson: gameJson };
+    }, function (err) {
+      if (err) {
+        console.error('[NET] 상태 전송 실패:', err);
+        if (typeof setFooterInfo === 'function') setFooterInfo('동기화 실패 — 다시 "차례 종료"를 눌러주세요.');
+      }
+    });
   }
   window.netBroadcast = broadcast;
 
-  function netApply(g) {
-    NET.started = true;
-    G = g;
-    if (!document.getElementById('screen-game').classList.contains('active')) _showScreen('game');
-    renderGame();
-    updateLock();
-    if (G.winner !== undefined && G.winner !== null) {
-      setTimeout(() => _triggerWin(G.winner), 300);
+  function netApply(slim) {
+    try {
+      NET.started = true;
+      G = deserializeG(slim);
+      console.log('[NET] 상태 적용 · myIdx=' + NET.myIdx + ' · turn=' + G.turn +
+                  ' · 손패=' + G.players.map(p => p.hand.length).join('/'));
+      if (!document.getElementById('screen-game').classList.contains('active')) _showScreen('game');
+      renderGame();
+      updateLock();
+      startTurnTimer();
+      if (G.winner !== undefined && G.winner !== null) {
+        stopTurnTimer();
+        setTimeout(() => _triggerWin(G.winner), 300);
+      }
+    } catch (e) {
+      console.error('[NET] 상태 적용 실패:', e);
+      if (typeof setFooterInfo === 'function')
+        setFooterInfo('상태 적용 오류 — 새로고침(Ctrl+Shift+R) 후 다시 시도해 주세요.');
     }
   }
 
@@ -3431,6 +3601,7 @@ showScreen('title');
       if (NET.waitingRegistered && NET.db) { NET.db.ref('lobby/waiting').remove(); NET.waitingRegistered = false; }
       if (NET.roomRef) {
         NET.roomRef.off();
+        NET.roomRef.child('combat').off();
         NET.roomRef.child('players/' + NET.myIdx + '/connected').set(false);
       }
     } catch (e) {}
@@ -3466,6 +3637,244 @@ showScreen('title');
     if ((id === 'title' || id === 'setup') && NET.active) window.netLeaveAll();
     _showScreen(id);
   };
+
+  /* ════════════ 차례 시간제한 (20초, 온·오프라인 공통) ════════════ */
+  const TURN_SECONDS = 20;
+  let turnTimer = null, turnRemaining = TURN_SECONDS;
+
+  function timerEl() { return document.getElementById('turn-timer'); }
+  function renderTimer() {
+    const el = timerEl(); if (!el) return;
+    el.textContent = '⏱ ' + turnRemaining + 's';
+    el.style.color = turnRemaining <= 5 ? 'var(--wu-color)' : 'var(--gold)';
+  }
+  function stopTurnTimer() {
+    if (turnTimer) { clearInterval(turnTimer); turnTimer = null; }
+    const el = timerEl(); if (el) el.style.display = 'none';
+  }
+  function gameScreenActive() {
+    const s = document.getElementById('screen-game');
+    return s && s.classList.contains('active');
+  }
+  function startTurnTimer() {
+    stopTurnTimer();
+    if (!gameScreenActive()) return;
+    if (typeof G === 'undefined' || !G || (G.winner !== undefined && G.winner !== null)) return;
+    if (NET.active && G.turn !== NET.myIdx) return;   // 온라인: 내 차례가 아니면 타이머 없음
+    turnRemaining = TURN_SECONDS;
+    const el = timerEl(); if (el) el.style.display = 'inline-block';
+    renderTimer();
+    turnTimer = setInterval(() => {
+      // 전투 주사위 창이 열려 있으면 일시정지
+      const modal = document.getElementById('dice-modal');
+      if (modal && modal.classList.contains('show')) return;
+      turnRemaining--;
+      renderTimer();
+      if (turnRemaining <= 0) {
+        stopTurnTimer();
+        if (gameScreenActive() && G && (G.winner === undefined || G.winner === null)) {
+          if (!NET.active || G.turn === NET.myIdx) {
+            if (typeof setFooterInfo === 'function') setFooterInfo('⏱ 시간 초과! 차례가 자동 종료됩니다.');
+            window.endTurn();
+          }
+        }
+      }
+    }, 1000);
+  }
+  window.startTurnTimer = startTurnTimer;
+  window.stopTurnTimer = stopTurnTimer;
+
+  // 헤더에 타이머 표시 요소 삽입
+  (function injectTimerEl() {
+    const td = document.getElementById('turn-display');
+    if (td && !document.getElementById('turn-timer')) {
+      const t = document.createElement('div');
+      t.id = 'turn-timer';
+      t.style.cssText = "font-family:'Cinzel',serif;font-weight:900;font-size:16px;margin-top:2px;display:none;";
+      td.parentElement.insertBefore(t, td.nextSibling);
+    }
+  })();
+
+  // 버전 표시 (양쪽 클라이언트가 같은 버전인지 눈으로 확인 + 캐시 문제 진단)
+  (function injectVersionBadge() {
+    console.log('%c[삼국열전기] 온라인 모듈 ' + NET_VERSION, 'color:#d4af37;font-weight:bold');
+    if (document.getElementById('net-version-badge')) return;
+    const b = document.createElement('div');
+    b.id = 'net-version-badge';
+    b.textContent = '⚙ ' + NET_VERSION;
+    b.style.cssText = 'position:fixed;bottom:4px;right:6px;z-index:1300;font-size:10px;color:#7a6a45;opacity:.65;pointer-events:none;';
+    document.body.appendChild(b);
+  })();
+  const _startGame_t = window.startGame;
+  window.startGame = function () { _startGame_t.apply(this, arguments); startTurnTimer(); };
+
+  const _endTurn_t = window.endTurn;
+  window.endTurn = function () {
+    if (NET.active && G && G.turn !== NET.myIdx) return; // 안전장치
+    _endTurn_t.apply(this, arguments);
+    if (NET.active) stopTurnTimer();   // 온라인: 내 차례 끝 → 정지 (다음 턴은 수신 시 시작)
+    else startTurnTimer();             // 오프라인: 다음 플레이어 차례 타이머 시작
+  };
+
+  const _triggerWin_t = window.triggerWin;
+  window.triggerWin = function (pi) { stopTurnTimer(); _triggerWin_t.apply(this, arguments); };
+
+  const _showScreen_t2 = window.showScreen;
+  window.showScreen = function (id) { if (id !== 'game') stopTurnTimer(); _showScreen_t2.apply(this, arguments); };
+
+  /* ════════════ 온라인 전투 (양쪽이 함께 보고, 각자 자기 주사위를 굴림) ════════════
+     공격자(현재 차례)가 combat 노드를 만들면 두 클라이언트가 같은 전투창을 본다.
+     각 플레이어는 자기 주사위만 굴려 combat/aRoll(공격자) · combat/dRoll(방어자)에 기록.
+     둘 다 굴리면: 동점→재굴림, 아니면 공격자 클라이언트가 결과를 계산·적용(권위) 후
+     결과를 공유하고, 확인 시 마무리(사망/탈출 처리)하고 상태를 즉시 동기화한다. */
+  let netCombat = { data: null };
+  let afkTimer = null;
+  function rollOneDie(isRM) {
+    return isRM ? (Math.ceil(Math.random() * 6) + Math.ceil(Math.random() * 6)) : Math.ceil(Math.random() * 6);
+  }
+
+  // 공격자(활성 클라이언트)가 전투 시작 → combat 노드 생성
+  window.startCombat = function (attacker, defender, targetRow, targetCol, fromRow, fromCol) {
+    if (!NET.active) return _startCombat(attacker, defender, targetRow, targetCol, fromRow, fromCol);
+    const cellType = BOARD_LAYOUT[targetRow][targetCol];
+    const isRM = (cellType === 'RM' || cellType === 'R1' || cellType === 'R2');
+    combatCtx = { attacker, defender, targetRow, targetCol, fromRow, fromCol, isRM, resolved: false, online: true };
+    NET.roomRef.child('combat').set({
+      seq: Date.now(),
+      attackerIdx: attacker.playerIdx, defenderIdx: defender.playerIdx,
+      attackerGen: attacker.id, defenderGen: defender.id,
+      attackerName: attacker.name, defenderName: defender.name,
+      attackerLevel: attacker.level, defenderLevel: defender.level,
+      attackerHp: attacker.hp, defenderHp: defender.hp,
+      isRM: isRM, round: 1, aRoll: null, dRoll: null, phase: 'rolling', result: null
+    });
+  };
+
+  // 주사위 버튼: 온라인 전투 중이면 "내 주사위만" 굴린다 (상대 차례여도 허용)
+  window.rollDice = function () {
+    if (NET.active && netCombat.data && netCombat.data.phase === 'rolling') return netRollMyDie();
+    if (NET.active && !myTurn()) return;
+    return _rollDice.apply(this, arguments);
+  };
+
+  function netRollMyDie() {
+    const c = netCombat.data;
+    if (!c || c.phase !== 'rolling') return;
+    const iAmAttacker = NET.myIdx === c.attackerIdx;
+    if (!iAmAttacker && NET.myIdx !== c.defenderIdx) return; // 관전자 아님(2인이라 없음)
+    const field = iAmAttacker ? 'aRoll' : 'dRoll';
+    if (c[field] != null) return; // 이미 굴림
+    const dieEl = document.getElementById(iAmAttacker ? 'dice-p1' : 'dice-p2');
+    dieEl.classList.add('rolling');
+    const btn = document.getElementById('dice-roll-btn');
+    btn.disabled = true; btn.textContent = '굴리는 중...';
+    setTimeout(() => {
+      dieEl.classList.remove('rolling');
+      NET.roomRef.child('combat/' + field).set(rollOneDie(c.isRM));
+    }, 500);
+  }
+
+  function showCombatModal(c) {
+    const modal = document.getElementById('dice-modal');
+    document.getElementById('dice-title').textContent = c.isRM ? '⚔ 로얄 매치 전투!' : '⚔ 전투!';
+    document.getElementById('dice-combatants').textContent =
+      `${c.attackerName} (Lv.${c.attackerLevel}, HP:${c.attackerHp}) VS ${c.defenderName} (Lv.${c.defenderLevel}, HP:${c.defenderHp})`;
+    document.getElementById('dice-p1-label').textContent =
+      `P${c.attackerIdx + 1} ${c.attackerName}` + (NET.myIdx === c.attackerIdx ? ' (나)' : '');
+    document.getElementById('dice-p2-label').textContent =
+      `P${c.defenderIdx + 1} ${c.defenderName}` + (NET.myIdx === c.defenderIdx ? ' (나)' : '');
+    document.getElementById('dice-p1').textContent = (c.aRoll != null ? c.aRoll : '?');
+    document.getElementById('dice-p2').textContent = (c.dRoll != null ? c.dRoll : '?');
+
+    const btn = document.getElementById('dice-roll-btn');
+    const iAmAttacker = NET.myIdx === c.attackerIdx;
+    const myRoll = iAmAttacker ? c.aRoll : c.dRoll;
+    const otherRoll = iAmAttacker ? c.dRoll : c.aRoll;
+    const resEl = document.getElementById('dice-result');
+
+    if (c.phase === 'result' && c.result) {
+      const lordNote = c.result.lordReduced
+        ? `<br><span style="color:var(--gold);font-size:12px">👑 군주 피해 감소 (${c.result.rawDmg} → ${c.result.dmg})</span>` : '';
+      resEl.innerHTML = `<span class="winner">${c.result.winnerName} 승리!</span><br>` +
+        `<span class="damage">${c.result.loserName} ${c.result.dmg} 피해 → HP ${c.result.loserHpAfter}/${c.result.loserMax}</span>` + lordNote;
+      if (iAmAttacker) { btn.textContent = '확인'; btn.disabled = false; btn.onclick = netFinishCombat; }
+      else { btn.textContent = '상대 확인 대기...'; btn.disabled = true; }
+    } else {
+      btn.onclick = window.rollDice;
+      if (myRoll == null) {
+        btn.textContent = '🎲 내 주사위 굴리기'; btn.disabled = false;
+        resEl.innerHTML = '<span style="color:var(--gold)">당신의 주사위를 굴리세요</span>';
+      } else if (otherRoll == null) {
+        btn.textContent = '상대가 굴리는 중...'; btn.disabled = true;
+        resEl.innerHTML = '<span style="color:var(--text-dim)">상대가 주사위를 굴리는 중...</span>';
+      } else {
+        btn.textContent = '...'; btn.disabled = true;
+        if (c.aRoll === c.dRoll) resEl.innerHTML = '<span style="color:var(--gold)">동점! 다시 굴립니다...</span>';
+        else resEl.innerHTML = '<span style="color:var(--text-dim)">결과 계산 중...</span>';
+      }
+    }
+    if (!modal.classList.contains('show')) modal.classList.add('show');
+  }
+
+  function onCombatUpdate(c) {
+    netCombat.data = c;
+    const modal = document.getElementById('dice-modal');
+    const btn = document.getElementById('dice-roll-btn');
+    if (!c) { // 전투 종료/없음
+      if (modal) modal.classList.remove('show');
+      if (btn) { btn.onclick = window.rollDice; btn.disabled = false; btn.textContent = '주사위 굴리기'; }
+      if (afkTimer) { clearTimeout(afkTimer); afkTimer = null; }
+      return;
+    }
+    showCombatModal(c);
+    // 공격자 클라이언트가 결과 계산을 주도
+    if (c.phase === 'rolling' && c.aRoll != null && c.dRoll != null && NET.myIdx === c.attackerIdx) {
+      setTimeout(() => resolveOnlineCombat(netCombat.data || c), 700);
+    }
+    // 한쪽이 안 굴리고 멈추는 것 방지: 공격자가 12초 후 빈 주사위 자동 굴림
+    if (c.phase === 'rolling' && NET.myIdx === c.attackerIdx) {
+      if (afkTimer) clearTimeout(afkTimer);
+      afkTimer = setTimeout(() => {
+        const cur = netCombat.data;
+        if (!cur || cur.phase !== 'rolling') return;
+        if (cur.aRoll == null) NET.roomRef.child('combat/aRoll').set(rollOneDie(cur.isRM));
+        if (cur.dRoll == null) NET.roomRef.child('combat/dRoll').set(rollOneDie(cur.isRM));
+      }, 12000);
+    }
+  }
+
+  function resolveOnlineCombat(c) {
+    if (!combatCtx || !combatCtx.online) return;
+    if (c.aRoll == null || c.dRoll == null || c.phase !== 'rolling') return;
+    if (c.aRoll === c.dRoll) { // 동점 → 재굴림
+      NET.roomRef.child('combat').update({ aRoll: null, dRoll: null, round: (c.round || 1) + 1 });
+      return;
+    }
+    const attacker = combatCtx.attacker, defender = combatCtx.defender;
+    const aWins = c.aRoll > c.dRoll;
+    const winner = aWins ? attacker : defender;
+    const loser = aWins ? defender : attacker;
+    const rawDmg = Math.abs(c.aRoll - c.dRoll);
+    // 군주는 전투에서 받는 피해를 1 차감 (공격력은 그대로, 최소 0)
+    const lordReduced = (loser.isLord && rawDmg > 0) ? 1 : 0;
+    const dmg = Math.max(0, rawDmg - lordReduced);
+    loser.hp -= dmg;
+    addLog(`⚔ ${attacker.name}(${c.aRoll}) vs ${defender.name}(${c.dRoll}): ${winner.name} 승! ${loser.name} -${dmg}HP${lordReduced ? ' (군주 -1)' : ''}`, 'battle');
+    NET.roomRef.child('combat').update({
+      phase: 'result',
+      result: { winnerName: winner.name, loserName: loser.name, dmg: dmg,
+                loserHpAfter: loser.hp, loserMax: loser.maxHp,
+                rawDmg: rawDmg, lordReduced: lordReduced }
+    });
+  }
+
+  function netFinishCombat() {
+    if (afkTimer) { clearTimeout(afkTimer); afkTimer = null; }
+    const ref = NET.roomRef;
+    _resolveCombat();              // 권위 처리: 사망/탈출/정리 + 렌더 (combatCtx 사용)
+    if (ref) ref.child('combat').remove();   // 두 화면 전투창 닫기
+    broadcast();                   // 갱신된 G(HP/사망 등)를 상대에게 즉시 동기화
+  }
 })();
 
 </script>
